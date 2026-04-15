@@ -1,4 +1,4 @@
 streamlit
 pandas
-Spire.Doc
+python-docx
 openpyxl
