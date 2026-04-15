@@ -1,85 +1,86 @@
 import streamlit as st
 import pandas as pd
 from docx import Document
-from docx.shared import RGBColor
-from openpyxl.styles import Font, Alignment, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 import io
 
-# --- 1. THE CORE ENGINE: EXTRACTING WITH STYLE ---
-def get_styled_content(doc):
-    content = []
-    # We iterate through paragraphs and tables in order
-    for block in doc.element.body.iterchildren():
-        if block.tag.endswith('p'): # Paragraph
-            from docx.text.paragraph import Paragraph
-            p = Paragraph(block, doc)
-            if p.text.strip():
-                # Store text + basic bold/italic metadata
-                is_bold = any(run.bold for run in p.runs)
-                content.append({'data': [p.text.strip()], 'bold': is_bold, 'type': 'text'})
+# --- INTEGRITY STYLING CONSTANTS ---
+HEADER_FILL = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid") # Professional Blue
+HEADER_FONT = Font(color="FFFFFF", bold=True, size=12)
+BORDER_STYLE = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+def process_document(word_file):
+    doc = Document(word_file)
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # We start with a blank sheet
+        df_empty = pd.DataFrame()
+        df_empty.to_excel(writer, sheet_name="Full_Report", index=False)
+        worksheet = writer.sheets["Full_Report"]
         
-        elif block.tag.endswith('tbl'): # Table
-            from docx.table import Table
-            t = Table(block, doc)
-            for row in t.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                content.append({'data': row_data, 'bold': False, 'type': 'table'})
-            content.append({'data': [], 'bold': False, 'type': 'spacer'})
-    return content
+        current_row = 1
 
-# --- 2. STREAMLIT INTERFACE ---
-st.set_page_config(page_title="High-Integrity Converter", layout="wide")
-st.title("📄 Professional Document Integrity System")
+        # 1. EXTRACT HEADER INTEGRITY
+        for section in doc.sections:
+            for para in section.header.paragraphs:
+                if para.text.strip():
+                    cell = worksheet.cell(row=current_row, column=1, value=para.text.strip())
+                    cell.font = Font(italic=True, color="808080")
+                    current_row += 1
 
-st.header("1. Word to Excel (Format & Style Preservation)")
-word_file = st.file_uploader("Upload Word Document", type=["docx"])
-
-if word_file:
-    try:
-        doc = Document(word_file)
-        styled_data = get_styled_content(doc)
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Create a dummy dataframe for the structure
-            df = pd.DataFrame([item['data'] for item in styled_data])
-            df.to_excel(writer, index=False, header=False, sheet_name="Integrity_Export")
+        # 2. EXTRACT BODY (Text and Tables)
+        for block in doc.element.body.iterchildren():
+            # Handle Paragraphs
+            if block.tag.endswith('p'):
+                from docx.text.paragraph import Paragraph
+                p = Paragraph(block, doc)
+                if p.text.strip():
+                    cell = worksheet.cell(row=current_row, column=1, value=p.text.strip())
+                    # Check for Bold/Heading style
+                    if any(run.bold for run in p.runs) or "Heading" in p.style.name:
+                        cell.font = Font(bold=True, size=14)
+                    current_row += 1
             
-            workbook = writer.book
-            worksheet = writer.sheets["Integrity_Export"]
+            # Handle Tables (Color & Border Integrity)
+            elif block.tag.endswith('tbl'):
+                from docx.table import Table
+                t = Table(block, doc)
+                for r_idx, row in enumerate(t.rows):
+                    for c_idx, cell_obj in enumerate(row.cells):
+                        cell = worksheet.cell(row=current_row, column=c_idx + 1, value=cell_obj.text.strip())
+                        cell.border = BORDER_STYLE
+                        
+                        # If it's the first row of a table, treat it as a Header
+                        if r_idx == 0:
+                            cell.fill = HEADER_FILL
+                            cell.font = HEADER_FONT
+                        else:
+                            cell.alignment = Alignment(wrap_text=True, vertical='center')
+                    current_row += 1
+                current_row += 1 # Space after table
 
-            # --- 3. APPLYING THE INTEGRITY STYLING ---
-            for idx, item in enumerate(styled_data):
-                row_num = idx + 1
-                for col_num, value in enumerate(item['data']):
-                    cell = worksheet.cell(row=row_num, column=col_num + 1)
-                    
-                    # Apply Bold if it was bold in Word
-                    if item.get('bold'):
-                        cell.font = Font(bold=True, size=12)
-                    
-                    # Layout Arrangement: Center text if it's in a table
-                    if item['type'] == 'table':
-                        cell.alignment = Alignment(vertical='center', wrap_text=True)
-                        # Light shading for tables to keep them distinct
-                        cell.fill = PatternFill(start_color="F9F9F9", end_color="F9F9F9", fill_type="solid")
+        # 3. EXTRACT FOOTER INTEGRITY
+        for section in doc.sections:
+            for para in section.footer.paragraphs:
+                if para.text.strip():
+                    worksheet.cell(row=current_row, column=1, value=f"FOOTER: {para.text.strip()}").font = Font(size=8)
+                    current_row += 1
 
-            # Autofit columns for professional look
-            for col in worksheet.columns:
-                max_length = 0
-                column = col[0].column_letter
-                for cell in col:
-                    if cell.value:
-                        max_length = max(max_length, len(str(cell.value)))
-                worksheet.column_dimensions[column].width = min(max_length + 5, 50)
+        # Column Formatting
+        for col in worksheet.columns:
+            worksheet.column_dimensions[col[0].column_letter].width = 30
 
-        st.success("Structure and Style mapping complete.")
-        st.download_button("Download Styled Excel", output.getvalue(), "formatted_report.xlsx")
-        
-    except Exception as e:
-        st.error(f"Integrity Error: {e}")
+    return output.getvalue()
 
-st.divider()
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Visual Integrity Converter")
+st.title("📄 Mirror-Image Converter")
 
-# --- 4. TASK 2: MULTI-SHEET MERGE ---
+uploaded_word = st.file_uploader("Upload Word Doc", type="docx")
+if uploaded_word:
+    result = process_document(uploaded_word)
+    st.success("Visual mapping applied (Headers, Footers, and Table Colors).")
+    st.download_button("Download High-Integrity Excel", result, "Final_Report.xlsx")
+
+# (Task 2 Merge logic remains same as previous stable version)
