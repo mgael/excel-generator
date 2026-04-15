@@ -1,103 +1,85 @@
 import streamlit as st
 import pandas as pd
 from docx import Document
-from docx.document import Document as _Document
-from docx.oxml.table import CT_Tbl
-from docx.oxml.text.paragraph import CT_P
-from docx.table import Table
-from docx.text.paragraph import Paragraph
+from docx.shared import RGBColor
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
 import io
 
-# 1. Define the Helper Function FIRST
-def iter_block_items(parent):
-    """
-    Yields each paragraph and table child within a docx document, 
-    preserving the original order.
-    """
-    if isinstance(parent, _Document):
-        parent_elm = parent.element.body
-    else:
-        parent_elm = parent._tc
+# --- 1. THE CORE ENGINE: EXTRACTING WITH STYLE ---
+def get_styled_content(doc):
+    content = []
+    # We iterate through paragraphs and tables in order
+    for block in doc.element.body.iterchildren():
+        if block.tag.endswith('p'): # Paragraph
+            from docx.text.paragraph import Paragraph
+            p = Paragraph(block, doc)
+            if p.text.strip():
+                # Store text + basic bold/italic metadata
+                is_bold = any(run.bold for run in p.runs)
+                content.append({'data': [p.text.strip()], 'bold': is_bold, 'type': 'text'})
+        
+        elif block.tag.endswith('tbl'): # Table
+            from docx.table import Table
+            t = Table(block, doc)
+            for row in t.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                content.append({'data': row_data, 'bold': False, 'type': 'table'})
+            content.append({'data': [], 'bold': False, 'type': 'spacer'})
+    return content
 
-    for child in parent_elm.iterchildren():
-        if isinstance(child, CT_P):
-            yield Paragraph(child, parent)
-        elif isinstance(child, CT_Tbl):
-            yield Table(child, parent)
-
-# 2. Set up Page Config
+# --- 2. STREAMLIT INTERFACE ---
 st.set_page_config(page_title="High-Integrity Converter", layout="wide")
+st.title("📄 Professional Document Integrity System")
 
-st.title("📄 Professional Document Converter")
-st.info("Ensuring data integrity by preserving document sequence.")
-
-# --- TASK 1: WORD TO EXCEL ---
-st.header("1. Convert Word to Excel")
-word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
+st.header("1. Word to Excel (Format & Style Preservation)")
+word_file = st.file_uploader("Upload Word Document", type=["docx"])
 
 if word_file:
     try:
         doc = Document(word_file)
-        data = []
-
-        # Now we use the function defined above
-        for block in iter_block_items(doc):
-            if isinstance(block, Paragraph):
-                if block.text.strip():
-                    data.append([block.text.strip()])
-            elif isinstance(block, Table):
-                for row in block.rows:
-                    row_data = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-                    data.append(row_data)
-                data.append([]) # Add a spacer row after tables
-
-        if data:
-            # Finding the max columns to ensure the DataFrame is consistent
-            max_cols = max(len(row) for row in data)
-            df_word = pd.DataFrame(data, columns=[f"Col {i+1}" for i in range(max_cols)])
+        styled_data = get_styled_content(doc)
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Create a dummy dataframe for the structure
+            df = pd.DataFrame([item['data'] for item in styled_data])
+            df.to_excel(writer, index=False, header=False, sheet_name="Integrity_Export")
             
-            st.success("Document analyzed successfully!")
-            st.dataframe(df_word.head(10))
+            workbook = writer.book
+            worksheet = writer.sheets["Integrity_Export"]
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_word.to_excel(writer, index=False, header=False)
-            
-            st.download_button(
-                label="Download Converted Excel",
-                data=output.getvalue(),
-                file_name="converted_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("No readable text or tables found in this document.")
+            # --- 3. APPLYING THE INTEGRITY STYLING ---
+            for idx, item in enumerate(styled_data):
+                row_num = idx + 1
+                for col_num, value in enumerate(item['data']):
+                    cell = worksheet.cell(row=row_num, column=col_num + 1)
+                    
+                    # Apply Bold if it was bold in Word
+                    if item.get('bold'):
+                        cell.font = Font(bold=True, size=12)
+                    
+                    # Layout Arrangement: Center text if it's in a table
+                    if item['type'] == 'table':
+                        cell.alignment = Alignment(vertical='center', wrap_text=True)
+                        # Light shading for tables to keep them distinct
+                        cell.fill = PatternFill(start_color="F9F9F9", end_color="F9F9F9", fill_type="solid")
 
+            # Autofit columns for professional look
+            for col in worksheet.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+                worksheet.column_dimensions[column].width = min(max_length + 5, 50)
+
+        st.success("Structure and Style mapping complete.")
+        st.download_button("Download Styled Excel", output.getvalue(), "formatted_report.xlsx")
+        
     except Exception as e:
-        st.error(f"System Error: {e}")
+        st.error(f"Integrity Error: {e}")
 
 st.divider()
 
-# --- TASK 2: MERGE EXCEL ---
-st.header("2. Merge Excel Files into Separate Sheets")
-excel_files = st.file_uploader("Upload Excel files", type=["xlsx"], accept_multiple_files=True)
-
-if excel_files:
-    try:
-        merged_out = io.BytesIO()
-        with pd.ExcelWriter(merged_out, engine='openpyxl') as writer:
-            for f in excel_files:
-                xls = pd.ExcelFile(f)
-                for sheet in xls.sheet_names:
-                    df = pd.read_excel(f, sheet_name=sheet)
-                    # Create unique sheet names: Filename_Sheetname
-                    clean_name = f"{f.name[:15]}_{sheet}"[:31]
-                    df.to_excel(writer, sheet_name=clean_name, index=False)
-        
-        st.success(f"Merged {len(excel_files)} file(s) into one workbook.")
-        st.download_button(
-            label="Download Merged Workbook",
-            data=merged_out.getvalue(),
-            file_name="merged_data.xlsx"
-        )
-    except Exception as e:
-        st.error(f"Error during merge: {e}")
+# --- 4. TASK 2: MULTI-SHEET MERGE ---
