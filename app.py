@@ -1,52 +1,58 @@
 import streamlit as st
 import pandas as pd
-from docx2python import docx2python
+from docx import Document
 import io
 
 st.set_page_config(page_title="Document Converter & Merger", layout="wide")
 
-st.title("📄 Document Processing System")
-st.markdown("Convert Word to Excel and Merge Multiple Sheets")
+st.title("📄 Professional Document Converter")
+st.markdown("Maintaining data integrity for Word-to-Excel conversion.")
 
-# --- TASK 1: WORD TO EXCEL ---
+# --- TASK 1: WORD TO EXCEL (INTEGRITY FOCUSED) ---
 st.header("1. Convert Word to Excel")
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
 
 if word_file:
-    # Extract data from Word
-    with docx2python(word_file) as doc:
-        # doc.body is a nested list: [sheet][table][row][cell]
-        # We simplify it to extract the first table found or all text
-        content = doc.body
-        
-    # Flattening logic: Taking the first table and making it a DataFrame
-    if content:
-        # Assuming table 1, row 1 is data
-        try:
-            data = content[0][0] # First table
-            df_word = pd.DataFrame(data)
-            
-            st.success("Word Document parsed successfully!")
-            st.dataframe(df_word.head())
+    doc = Document(word_file)
+    all_data = []
 
-            # Convert to Excel download link
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_word.to_excel(writer, index=False, header=False)
-            
-            st.download_button(
-                label="Download as Excel",
-                data=output.getvalue(),
-                file_name="converted_word.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        except Exception as e:
-            st.error("Could not find a clear table structure in this Word doc.")
+    # Iterate through all elements in the document in order
+    for block in doc.iter_block_items():
+        # If it's a paragraph, add it to a new row
+        if hasattr(block, 'text'):
+            if block.text.strip():
+                all_data.append([block.text])
+        
+        # If it's a table, extract all rows and cells
+        elif hasattr(block, 'rows'):
+            for row in block.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                all_data.append(row_data)
+
+    if all_data:
+        # Create DataFrame - using max columns found to avoid alignment issues
+        df_word = pd.DataFrame(all_data)
+        
+        st.success("Content extracted! Review the preview below:")
+        st.dataframe(df_word.head(10))
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_word.to_excel(writer, index=False, header=False)
+        
+        st.download_button(
+            label="Download Converted Excel",
+            data=output.getvalue(),
+            file_name="converted_document.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.error("The document appears to be empty or unreadable.")
 
 st.divider()
 
 # --- TASK 2: MERGE EXCEL FILES ---
-st.header("2. Merge Excel Files into Sheets")
+st.header("2. Merge Excel Files into Separate Sheets")
 uploaded_files = st.file_uploader("Upload multiple Excel files", type=["xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -54,17 +60,43 @@ if uploaded_files:
     
     with pd.ExcelWriter(output_merged, engine='openpyxl') as writer:
         for file in uploaded_files:
-            # Read each uploaded file
-            df = pd.read_excel(file)
-            # Use the filename (minus .xlsx) as the sheet name
-            sheet_name = file.name.split('.')[0][:30] 
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            # Integrity check: read all sheets from the uploaded file
+            xls = pd.ExcelFile(file)
+            for sheet_name in xls.sheet_names:
+                df = pd.read_excel(file, sheet_name=sheet_name)
+                # Clean sheet name: combine filename and original sheet name
+                final_sheet_name = f"{file.name[:15]}_{sheet_name}"[:31]
+                df.to_excel(writer, sheet_name=final_sheet_name, index=False)
     
-    st.success(f"Merged {len(uploaded_files)} files into one workbook!")
+    st.success(f"Successfully merged {len(uploaded_files)} file(s)!")
     
     st.download_button(
         label="Download Merged Workbook",
         data=output_merged.getvalue(),
-        file_name="merged_report.xlsx",
+        file_name="merged_workbook.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+# Logic to handle the sequence of document elements
+def iter_block_items(parent):
+    from docx.document import Document as _Document
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import _Cell, Table
+    from docx.text.paragraph import Paragraph
+
+    if isinstance(parent, _Document):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+    else:
+        raise TypeError("Unknown parent type")
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
+# Inject the helper function into Document
+Document.iter_block_items = iter_block_items
